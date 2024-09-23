@@ -41,7 +41,7 @@ from sklearn.metrics import classification_report, confusion_matrix, ConfusionMa
 from sklearn.utils.class_weight import compute_class_weight
 
 class DataGenerator(tf.keras.utils.Sequence):
-    def __init__(self, file_path, read_size, batch_size, num_classes, csv_length, initial_pos = True, final_pos = False):
+    def __init__(self, file_path, read_size, batch_size, num_classes, csv_length, initial_pos = True, final_pos = False, legal_moves = False, move = False, single_move = False, single_and_partial = False, shuffle = True, sparse_single_and_partial = False, pgn_data = False):
         self.file_path = file_path
         self.batch_size = batch_size
         self.read_size = read_size
@@ -50,6 +50,13 @@ class DataGenerator(tf.keras.utils.Sequence):
         self.current_read = None
         self.initial_pos = initial_pos
         self.final_pos = final_pos
+        self.legal_moves = legal_moves
+        self.move = move
+        self.single_move = single_move
+        self.single_and_partial = single_and_partial
+        self.sparse_single_and_partial = sparse_single_and_partial
+        self.pgn_data = pgn_data
+        self.shuffle = shuffle
         self.on_epoch_end()
 
     def __len__(self):
@@ -61,19 +68,36 @@ class DataGenerator(tf.keras.utils.Sequence):
     def __getitem__(self, index):
         if index % (self.read_size // self.batch_size) == 0:
             self.current_read = pd.read_csv(self.file_path, skiprows=range(1, (index * self.batch_size) + 1), nrows=self.read_size)
+            if self.shuffle:
+                self.current_read = self.current_read.sample(frac=1).reset_index(drop=True)
         batch = self.get_batch(index % (self.read_size // self.batch_size))
         X, y = self.__data_generation__(batch)
         return X, y
+    
 
     def __data_generation__(self, df):
-        X = np.array(df['board'].apply(json.loads).tolist())
+        if self.pgn_data:
+            X = np.array(df['board_pgn'])
+        else:
+            X = np.array(df['board'].apply(json.loads).tolist())
         if self.initial_pos and not self.final_pos:
             y = self.encode_pos(df['initial_pos'])
         elif self.final_pos and not self.initial_pos:
             y = self.encode_pos(df['final_pos'])
         elif self.initial_pos and self.final_pos:
             y = [self.encode_pos(df['initial_pos']), self.encode_pos(df['final_pos'])]
+        if self.move:
+            y = self.encode_move_one_hot(df['move'])
+        if self.single_move:
+            y = self.encode_single_move(df['move'])
+        if self.single_and_partial:
+            y = [self.encode_single_move(df['move']), self.encode_pos(df['initial_pos']), self.encode_pos(df['final_pos'])]
+        if self.sparse_single_and_partial:
+            y = [self.encode_sparse_single_move(df['move']), self.encode_pos(df['initial_pos']), self.encode_pos(df['final_pos'])]
+        if self.pgn_data:
+            y = [self.encode_sparse_single_move(df['move']), self.encode_pos(df['initial_pos']), self.encode_pos(df['final_pos'])]
         return X, y
+
     
     def get_batch(self, index):
         start = index * self.batch_size
@@ -95,6 +119,63 @@ class DataGenerator(tf.keras.utils.Sequence):
         for pos in positions:
             encoded_positions.append((column_to_number.get(pos[0]) - 1) +  ((8 - int(pos[1])) * 8))
         return np.array(encoded_positions)
+    
+    def encode_move_one_hot(self, moves):
+        column_to_number = {
+            'a': 1,
+            'b': 2,
+            'c': 3,
+            'd': 4,
+            'e': 5,
+            'f': 6,
+            'g': 7,
+            'h': 8
+        }
+        encoded_moves = []
+        for move in moves:
+            encoded_initial_pos = np.zeros(64)
+            encoded_initial_pos[((column_to_number.get(move[0]) - 1)) +  ((8 - int(move[1])) * 8)] = 1
+            encoded_final_pos = np.zeros(64)
+            encoded_final_pos[((column_to_number.get(move[2]) - 1)) +  ((8 - int(move[3])) * 8)] = 1
+
+            encoded_moves.append(np.concatenate((encoded_initial_pos, encoded_final_pos), axis=None))
+        return np.array(encoded_moves)
+    
+    def encode_single_move(self, moves):
+        column_to_number = {
+            'a': 1,
+            'b': 2,
+            'c': 3,
+            'd': 4,
+            'e': 5,
+            'f': 6,
+            'g': 7,
+            'h': 8
+        }
+        encoded_moves = []
+        for move in moves:
+            encoded_move = np.zeros(4096)
+            encoded_move[(((column_to_number.get(move[0]) - 1)) + ((8 - int(move[1])) * 8)) * 64 + (((column_to_number.get(move[2]) - 1)) + ((8 - int(move[3])) * 8))] = 1
+            encoded_moves.append(encoded_move)
+        return np.array(encoded_moves)
+    
+    def encode_sparse_single_move(self, moves):
+        column_to_number = {
+            'a': 1,
+            'b': 2,
+            'c': 3,
+            'd': 4,
+            'e': 5,
+            'f': 6,
+            'g': 7,
+            'h': 8
+        }
+        encoded_moves = []
+        for move in moves:
+            encoded_moves.append((((column_to_number.get(move[0]) - 1)) + ((8 - int(move[1])) * 8)) * 64 + (((column_to_number.get(move[2]) - 1)) + ((8 - int(move[3])) * 8)))
+        return np.array(encoded_moves)
+
+
     
 
 def plot_graph(history):
@@ -187,3 +268,36 @@ def decode_pos(positions):
             decoded_pos = number_to_column.get(pos % 8 + 1) + str(8 - (pos // 8))
             decoded_positions.append(decoded_pos)
         return np.array(decoded_positions)
+
+
+class ErrorDataGenerator(tf.keras.utils.Sequence):
+    def __init__(self, file_path, read_size, batch_size, csv_length):
+        self.file_path = file_path
+        self.batch_size = batch_size
+        self.read_size = read_size
+        self.csv_length = csv_length
+        self.current_read = None
+        self.on_epoch_end()
+
+    def __len__(self):
+        return int(np.ceil(self.csv_length / self.batch_size))
+
+    def on_epoch_end(self):
+        pass
+
+    def __getitem__(self, index):
+        if index % (self.read_size // self.batch_size) == 0:
+            self.current_read = pd.read_csv(self.file_path, skiprows=range(1, (index * self.batch_size) + 1), nrows=self.read_size)
+        batch = self.get_batch(index % (self.read_size // self.batch_size))
+        X, y = self.__data_generation__(batch)
+        return X, y
+
+    def __data_generation__(self, df):
+        X = np.array(df['board'].apply(json.loads).tolist())
+        y = np.array(df['is_blunder_cp'])
+        return X, y
+    
+    def get_batch(self, index):
+        start = index * self.batch_size
+        end = start + self.batch_size
+        return self.current_read.iloc[start:end]
